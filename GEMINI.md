@@ -14,6 +14,7 @@ Tài liệu này đóng vai trò là bảng quy tắc làm việc và nhật ký
 2. **Quy Trình Kiểm Tra & Tích hợp Swagger (Verification & Swagger UI)**:
    * Tích hợp **Swagger OpenAPI** (`@nestjs/swagger`) ở địa chỉ `/api/docs` hoặc `/docs` để Admin dễ dàng kiểm tra các endpoints trực quan.
    * Tất cả các Controller và endpoint phải khai báo Swagger tags (`@ApiTags`), operation (`@ApiOperation`), và responses (`@ApiResponse`) đầy đủ.
+   * **Đồng bộ Kiểu dữ liệu & Sinh code tự động (API Code Gen cho Frontend)**: Khi bắt đầu phát triển Frontend (Next.js / Expo), lập trình viên nên sử dụng các công cụ tự động hóa như `openapi-typescript` hoặc `orval` để kết nối trực tiếp đến endpoint `http://localhost:3001/api/docs-json` của Backend đang chạy. Công cụ này sẽ tự động biên dịch và sinh ra toàn bộ TypeScript types cùng các hàm gọi API (API client), giúp tiết kiệm thời gian code tay và bảo đảm đồng bộ kiểu dữ liệu tuyệt đối giữa hai phía.
    * Sau mỗi Phase, AI **bắt buộc** phải tự chạy test kiểm tra (viết unit test hoặc các file script cURL/Node.js độc lập để gửi request thực tế kiểm thử API) và báo cáo kết quả (Logs, Response JSON) cho người dùng.
 
 3. **Xử Lý Lỗi & Không Dùng Dữ Liệu Fallback (Strict Error Handling)**:
@@ -25,6 +26,12 @@ Tài liệu này đóng vai trò là bảng quy tắc làm việc và nhật ký
    * **Row Level Security (RLS)**: Mọi API liên quan đến người dùng phải xác thực Token (JWT từ Supabase Auth) và kiểm tra quyền sở hữu bản ghi.
    * **Kiểm soát Upload file**: Validate kích thước file, định dạng (chỉ cho phép EPUB/PDF) để tránh các cuộc tấn công mã độc.
    * **Rate Limiting**: Hạn chế số lượng request gọi AI tóm tắt từ Admin để tránh phát sinh chi phí hoặc bị block IP.
+   * **Cấu hình Redirect URL (Production) & Email Verification**:
+     * **Phía NestJS Backend**: Redirect URL cho các thao tác xác thực (Xác nhận Email đăng ký mới và Link đặt lại mật khẩu) được cấu hình động thông qua biến môi trường `FRONTEND_URL` (mặc định là `http://localhost:3000` ở môi trường phát triển). Khi deploy Production, chỉ cần cập nhật giá trị `FRONTEND_URL` thành tên miền chính thức của Frontend (ví dụ: `https://easyreading.com`).
+     * **Phía Supabase Dashboard**: Khi chuyển sang tên miền thật, bắt buộc phải vào **Supabase Dashboard -> Settings -> Authentication**:
+       1. Cập nhật **Site URL** thành tên miền chính thức của website (ví dụ: `https://easyreading.com`).
+       2. Thêm tên miền chính thức vào danh sách **Redirect URLs** (ví dụ: `https://easyreading.com/**`).
+       3. Điều này đảm bảo khi người dùng nhấn vào liên kết xác thực trong email đăng ký hoặc email đặt lại mật khẩu, Supabase sẽ định tuyến chính xác về website thật.
 
 ---
 
@@ -58,10 +65,12 @@ apps/api/src/
 * [x] Cấu hình Global Filters (bắt lỗi hệ thống) và Validation Pipes (tự động validate dữ liệu đầu vào).
 * [x] *Kiểm tra*: Chạy thử NestJS, gọi API mẫu kiểm tra kết nối Supabase thành công.
 
-### Phase 2: Authentication & Authorization (Xác thực & Phân quyền)
-* [ ] Tạo `AuthModule` và `AuthGuard` để giải mã JWT Token gửi từ Client (Next.js / Expo Mobile).
-* [ ] Thiết lập phân quyền Admin: Tạo decorator `@Roles('admin')` và `RolesGuard` để bảo vệ các route upload sách.
-* [ ] *Kiểm tra*: Thử gửi request không có token, có token thường, và có token admin để xác nhận cơ chế phân quyền hoạt động đúng.
+### Phase 2: Authentication & Authorization (Xác thực & Phân quyền - Auth Proxy Gateway)
+* [x] Tạo `AuthModule` cùng với `AuthController`, `AuthService` và các DTOs xác thực (`RegisterDto`, `LoginDto`, `GoogleLoginDto`, `RefreshTokenDto`, `ForgotPasswordDto`, `ResetPasswordDto`).
+* [x] Viết API đăng ký, đăng nhập email/password, đăng nhập Google, làm mới token (refresh token), yêu cầu quên mật khẩu, đặt lại mật khẩu mới và đăng xuất thông qua cổng NestJS proxy.
+* [x] Tạo `AuthGuard` trích xuất JWT Token và xác thực qua Supabase Auth Service.
+* [x] Thiết lập decorator `@Roles('admin')` và `RolesGuard` để bảo vệ các endpoint của Admin.
+* [x] *Kiểm tra*: Thử nghiệm các API đăng ký/đăng nhập, truy cập profile yêu cầu đăng nhập, truy cập route admin-only (với token thường và token admin) để đảm bảo phân quyền hoạt động chính xác.
 
 ### Phase 3: Book Processing & AI Summary (Xử lý sách & Tóm tắt AI)
 * [ ] Tạo endpoint cho Admin upload file EPUB/PDF.
@@ -89,7 +98,7 @@ apps/api/src/
 | Giai đoạn | Nội dung công việc | Trạng thái | Ghi chú |
 | :--- | :--- | :--- | :--- |
 | **Phase 1** | Setup & Core Infrastructure | ✅ Hoàn thành | Đã tích hợp Swagger UI, validation global, exception filter và Supabase connection |
-| **Phase 2** | Authentication & Authorization | ⏳ Chuẩn bị | |
+| **Phase 2** | Authentication & Authorization | ✅ Hoàn thành | Đã hoàn thành các endpoint, guard, DTO và hỗ trợ redirect domain động qua FRONTEND_URL |
 | **Phase 3** | Book Processing & AI Summary | ⏳ Chuẩn bị | |
 | **Phase 4** | Vocabulary & Flashcard SRS | ⏳ Chuẩn bị | |
 | **Phase 5** | Admin Dashboard & Statistics | ⏳ Chuẩn bị | |
