@@ -31,6 +31,10 @@ class EnvironmentVariables {
   @IsString()
   @IsNotEmpty()
   GEMINI_API_KEY: string;
+
+  @IsString()
+  @IsOptional()
+  FRONTEND_URL: string = 'http://localhost:3000';
 }
 
 export function validate(config: Record<string, any>) {
