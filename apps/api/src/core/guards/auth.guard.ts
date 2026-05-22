@@ -4,41 +4,48 @@ import {
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
-import { SupabaseService } from '../config/supabase.service';
+import { JwtService } from '@nestjs/jwt';
+import { Request } from 'express';
 
 @Injectable()
 export class AuthGuard implements CanActivate {
-  constructor(private readonly supabaseService: SupabaseService) {}
+  constructor(private readonly jwtService: JwtService) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    const request = context.switchToHttp().getRequest();
+    const request = context
+      .switchToHttp()
+      .getRequest<Request & { user?: unknown }>();
     const token = this.extractTokenFromHeader(request);
 
     if (!token) {
-      throw new UnauthorizedException('Mã JWT Token không được tìm thấy ở Authorization Header');
+      throw new UnauthorizedException(
+        'Mã JWT Token không được tìm thấy ở Authorization Header',
+      );
     }
 
     try {
-      const client = this.supabaseService.getClient();
-      const {
-        data: { user },
-        error,
-      } = await client.auth.getUser(token);
+      const payload = await this.jwtService.verifyAsync<{
+        sub: string;
+        email: string;
+        role: 'user' | 'admin';
+      }>(token);
 
-      if (error || !user) {
-        throw new UnauthorizedException('Mã token không hợp lệ, giả mạo hoặc đã hết hạn');
-      }
-
-      // Đính kèm thông tin user thu được từ Supabase vào request
-      request.user = user;
-    } catch (err) {
-      throw new UnauthorizedException('Xác thực token thất bại');
+      // Đính kèm thông tin user vào request
+      request.user = {
+        id: payload.sub,
+        email: payload.email,
+        role: payload.role,
+      };
+    } catch {
+      throw new UnauthorizedException(
+        'Mã token không hợp lệ, giả mạo hoặc đã hết hạn',
+      );
     }
 
     return true;
   }
 
-  private extractTokenFromHeader(request: any): string | null {
+  private extractTokenFromHeader(request: Request): string | null {
     const authHeader = request.headers.authorization;
     if (!authHeader) {
       return null;

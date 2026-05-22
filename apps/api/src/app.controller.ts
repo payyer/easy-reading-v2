@@ -1,15 +1,15 @@
 import { Controller, Get, InternalServerErrorException } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { AppService } from './app.service';
-import { SupabaseService } from './core/config/supabase.service';
+import { DataSource } from 'typeorm';
 
 @ApiTags('System')
 @Controller()
 export class AppController {
   constructor(
     private readonly appService: AppService,
-    private readonly supabaseService: SupabaseService,
-  ) { }
+    private readonly dataSource: DataSource,
+  ) {}
 
   @Get()
   @ApiOperation({ summary: 'API Chào mừng' })
@@ -19,28 +19,23 @@ export class AppController {
   }
 
   @Get('health')
-  @ApiOperation({ summary: 'Kiểm tra trạng thái kết nối tới Supabase' })
+  @ApiOperation({ summary: 'Kiểm tra trạng thái kết nối tới Database' })
   @ApiResponse({ status: 200, description: 'Kết nối ổn định' })
-  @ApiResponse({ status: 500, description: 'Không thể kết nối tới Supabase' })
+  @ApiResponse({ status: 500, description: 'Không thể kết nối tới Database' })
   async checkHealth() {
     try {
-      const client = this.supabaseService.getClient();
-
-      // Thực hiện một cuộc gọi thực tế tới API Supabase để kiểm tra kết nối mạng và khóa API Key
-      const { error } = await client.auth.admin.listUsers();
-
-      if (error) {
-        throw new Error(error.message);
-      }
+      // Thực hiện một câu lệnh SELECT 1 thực tế để kiểm tra kết nối CSDL
+      await this.dataSource.query('SELECT 1');
 
       return {
         status: 'ok',
-        supabase: 'connected',
+        database: 'connected',
         timestamp: new Date().toISOString(),
       };
-    } catch (err) {
+    } catch (err: unknown) {
+      const error = err instanceof Error ? err : new Error(String(err));
       throw new InternalServerErrorException(
-        `Supabase connection failed: ${err.message}`,
+        `Database connection failed: ${error.message}`,
       );
     }
   }

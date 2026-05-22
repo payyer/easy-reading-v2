@@ -22,16 +22,17 @@ Tài liệu này đóng vai trò là bảng quy tắc làm việc và nhật ký
    * Khi gặp lỗi, hệ thống phải luôn ném ra **NestJS Built-in HTTP Exceptions** (như `NotFoundException`, `BadRequestException`, `InternalServerErrorException`, `UnauthorizedException`) với mã HTTP Status tương ứng để Client phát hiện và xử lý chính xác.
 
 4. **Kiểm Tra An Toàn Thông Tin & Bảo Mật (Security Checklists)**:
-   * **Bảo vệ API Keys**: Tuyệt đối không hardcode API Key của Supabase hay Gemini.
-   * **Row Level Security (RLS)**: Mọi API liên quan đến người dùng phải xác thực Token (JWT từ Supabase Auth) và kiểm tra quyền sở hữu bản ghi.
-   * **Kiểm soát Upload file**: Validate kích thước file, định dạng (chỉ cho phép EPUB/PDF) để tránh các cuộc tấn công mã độc.
+   * **Bảo vệ API Keys**: Tuyệt đối không hardcode API Key của các dịch vụ bên thứ ba (như Gemini).
+   * **Xác thực và Phân quyền**: Mọi API liên quan đến người dùng phải được bảo vệ bởi `AuthGuard` (xác thực mã JWT nội bộ). Logic bảo mật bản ghi được xử lý ở mức code thông qua truy vấn có điều kiện `user_id = req.user.id` để tránh truy cập trái phép.
+   * **Kiểm soát Upload file**: Validate kích thước file, định dạng (chỉ cho phép EPUB) để tránh các cuộc tấn công mã độc.
    * **Rate Limiting**: Hạn chế số lượng request gọi AI tóm tắt từ Admin để tránh phát sinh chi phí hoặc bị block IP.
    * **Cấu hình Redirect URL (Production) & Email Verification**:
      * **Phía NestJS Backend**: Redirect URL cho các thao tác xác thực (Xác nhận Email đăng ký mới và Link đặt lại mật khẩu) được cấu hình động thông qua biến môi trường `FRONTEND_URL` (mặc định là `http://localhost:3000` ở môi trường phát triển). Khi deploy Production, chỉ cần cập nhật giá trị `FRONTEND_URL` thành tên miền chính thức của Frontend (ví dụ: `https://easyreading.com`).
-     * **Phía Supabase Dashboard**: Khi chuyển sang tên miền thật, bắt buộc phải vào **Supabase Dashboard -> Settings -> Authentication**:
-       1. Cập nhật **Site URL** thành tên miền chính thức của website (ví dụ: `https://easyreading.com`).
-       2. Thêm tên miền chính thức vào danh sách **Redirect URLs** (ví dụ: `https://easyreading.com/**`).
-       3. Điều này đảm bảo khi người dùng nhấn vào liên kết xác thực trong email đăng ký hoặc email đặt lại mật khẩu, Supabase sẽ định tuyến chính xác về website thật.
+     * **Gửi mail**: Hệ thống sử dụng `nodemailer` gửi mail xác thực/reset qua cấu hình SMTP trong `.env`. Ở môi trường local development, nếu không cấu hình các biến SMTP, hệ thống tự động in link kích hoạt/reset ra terminal console để test nhanh.
+
+5. **Cơ Chế Đồng Bộ & Timeout của API Upload Sách**:
+   * **Cơ chế xử lý**: API `POST /books/upload` được xử lý bất đồng bộ (asynchronous). Server sẽ lưu sách vào DB với trạng thái `processing` và trả về phản hồi `202 Accepted` lập tức cho client. Quá trình xử lý sách và tóm tắt từng chương bằng Gemini API sẽ được tiếp tục chạy dưới nền (background).
+   * **Lưu ý Deployment (Vercel/Serverless)**: Do các nền tảng Serverless (như Vercel Hobby/Pro) sẽ đóng băng (freeze) luồng CPU ngay sau khi phản hồi HTTP được gửi đi, tiến trình chạy ngầm dưới nền sẽ bị ngắt đột ngột và sách không thể hoàn thành. Do đó, Backend NestJS bắt buộc phải được triển khai trên môi trường hỗ trợ chạy liên tục (persistent process) như VPS, Render, Railway thay vì Vercel. Phía Frontend Next.js vẫn có thể deploy lên Vercel bình thường.
 
 ---
 
@@ -42,16 +43,18 @@ Phân chia theo cấu trúc **Module-based** để dễ mở rộng và tích h�
 ```text
 apps/api/src/
 ├── core/                   # Cấu hình hệ thống dùng chung
-│   ├── config/             # Cấu hình env, supabase, gemini
+│   ├── config/             # Cấu hình env, typeorm.config, gemini
 │   ├── filters/            # Global Exception Filter (xử lý lỗi tập trung)
-│   ├── guards/             # Auth Guard (xác thực token Supabase)
+│   ├── guards/             # Auth Guard (xác thực token JWT nội bộ)
 │   └── interceptors/       # Transform Response Interceptor
+├── database/               # Cơ sở dữ liệu và di chuyển dữ liệu
+│   └── migrations/         # Các file migration của TypeORM
 ├── modules/                # Các module nghiệp vụ chính
-│   ├── auth/               # Quản lý session, phân quyền người dùng
+│   ├── auth/               # Quản lý tài khoản (hashing, JWT, google auth, mailer)
 │   ├── books/              # Xử lý upload, đọc và tóm tắt sách
 │   ├── vocab/              # Quản lý kho từ vựng cá nhân
 │   ├── srs/                # Tính toán thuật toán lặp lại ngắt quãng SM-2
-│   └── ai/                 # NestJS Service làm việc trực tiếp với Gemini 1.5 API
+│   └── ai/                 # NestJS Service làm việc trực tiếp với Gemini API
 └── main.ts                 # Điểm khởi chạy của NestJS ứng dụng
 ```
 
@@ -61,24 +64,24 @@ apps/api/src/
 
 ### Phase 1: Setup & Core Infrastructure (Hạ tầng cốt lõi)
 * [x] Thiết lập cấu hình biến môi trường (`ConfigModule`, `dotenv`).
-* [x] Tạo dịch vụ kết nối và tích hợp Supabase Client (`SupabaseService`).
+* [x] Cấu hình kết nối cơ sở dữ liệu PostgreSQL sử dụng TypeORM (`TypeOrmModule`).
 * [x] Cấu hình Global Filters (bắt lỗi hệ thống) và Validation Pipes (tự động validate dữ liệu đầu vào).
-* [x] *Kiểm tra*: Chạy thử NestJS, gọi API mẫu kiểm tra kết nối Supabase thành công.
+* [x] *Kiểm tra*: Chạy thử NestJS, gọi API mẫu kiểm tra kết nối PostgreSQL thành công.
 
 ### Phase 2: Authentication & Authorization (Xác thực & Phân quyền - Auth Proxy Gateway)
 * [x] Tạo `AuthModule` cùng với `AuthController`, `AuthService` và các DTOs xác thực (`RegisterDto`, `LoginDto`, `GoogleLoginDto`, `RefreshTokenDto`, `ForgotPasswordDto`, `ResetPasswordDto`).
 * [x] Viết API đăng ký, đăng nhập email/password, đăng nhập Google, làm mới token (refresh token), yêu cầu quên mật khẩu, đặt lại mật khẩu mới và đăng xuất thông qua cổng NestJS proxy.
-* [x] Tạo `AuthGuard` trích xuất JWT Token và xác thực qua Supabase Auth Service.
+* [x] Tạo `AuthGuard` trích xuất JWT Token và xác thực thủ công nội bộ.
 * [x] Thiết lập decorator `@Roles('admin')` và `RolesGuard` để bảo vệ các endpoint của Admin.
 * [x] *Kiểm tra*: Thử nghiệm các API đăng ký/đăng nhập, truy cập profile yêu cầu đăng nhập, truy cập route admin-only (với token thường và token admin) để đảm bảo phân quyền hoạt động chính xác.
 
 ### Phase 3: Book Processing & AI Summary (Xử lý sách & Tóm tắt AI)
-* [ ] Tạo endpoint cho Admin upload file EPUB/PDF.
-* [ ] Viết Service đọc file tạm, trích xuất văn bản thô theo chương.
-* [ ] Tạo `AIService` kết nối với Gemini 1.5 Flash (sử dụng `@google/genai` SDK).
-* [ ] Thiết kế Prompt chuyên dụng để Gemini trả về JSON chứa tóm tắt 3 cấp độ (A1-A2, B1-B2, C1-C2) cho từng chương.
-* [ ] Lưu trữ các bản tóm tắt chữ vào PostgreSQL và thực hiện xóa file gốc khỏi bộ nhớ tạm.
-* [ ] *Kiểm tra*: Upload thử 1 file EPUB mẫu, kiểm tra dữ liệu tóm tắt được lưu trong database và kiểm tra xem file tạm đã bị xóa chưa.
+* [x] Tạo endpoint cho Admin upload file EPUB (loại bỏ PDF để đơn giản hóa cấu trúc).
+* [x] Viết Service đọc file tạm, trích xuất văn bản thô theo chương.
+* [x] Tạo `AIService` kết nối với Gemini (mặc định model gemini-2.5-flash, cấu hình động qua `GEMINI_MODEL`, sử dụng `@google/genai` SDK).
+* [x] Thiết kế Prompt chuyên dụng để Gemini trả về JSON chứa tóm tắt 3 cấp độ (A1-A2, B1-B2, C1-C2) cho từng chương.
+* [x] Lưu trữ các bản tóm tắt chữ vào PostgreSQL sử dụng TypeORM và thực hiện xóa file gốc khỏi bộ nhớ tạm.
+* [x] *Kiểm tra*: Viết API xử lý bất đồng bộ ngầm dưới nền (Background Worker) kết hợp Throttle delay (4.5s) và Exponential Backoff Retry để tránh lỗi 429 Rate Limit và 504 Gateway Timeout. Thực hiện xóa file tạm và xóa sạch database nếu xảy ra lỗi giữa chừng để tránh rác DB.
 
 ### Phase 4: Vocabulary & Flashcard SRS (Học từ vựng & Lặp lại ngắt quãng)
 * [ ] Tạo module quản lý từ vựng (`VocabModule`): Thêm từ mới kèm câu ngữ cảnh, xóa từ.
@@ -97,8 +100,8 @@ apps/api/src/
 
 | Giai đoạn | Nội dung công việc | Trạng thái | Ghi chú |
 | :--- | :--- | :--- | :--- |
-| **Phase 1** | Setup & Core Infrastructure | ✅ Hoàn thành | Đã tích hợp Swagger UI, validation global, exception filter và Supabase connection |
-| **Phase 2** | Authentication & Authorization | ✅ Hoàn thành | Đã hoàn thành các endpoint, guard, DTO và hỗ trợ redirect domain động qua FRONTEND_URL |
-| **Phase 3** | Book Processing & AI Summary | ⏳ Chuẩn bị | |
+| **Phase 1** | Setup & Core Infrastructure | ✅ Hoàn thành | Đã tích hợp Swagger UI, validation global, exception filter và TypeORM PostgreSQL connection |
+| **Phase 2** | Authentication & Authorization | ✅ Hoàn thành | Đã hoàn thành các endpoint, local JWT guard, DTO, mã hóa mật khẩu bcrypt, tích hợp SMTP MailService |
+| **Phase 3** | Book Processing & AI Summary | ✅ Hoàn thành | Đã hoàn thành API upload sách EPUB, trích xuất text, gọi Gemini API sinh tóm tắt 3 cấp độ dưới nền ngầm (Async Background), throttle 4.5s để tránh Rate Limit, lưu trữ qua TypeORM, tự động xóa file tạm và rollback xóa dữ liệu khi có lỗi xảy ra. |
 | **Phase 4** | Vocabulary & Flashcard SRS | ⏳ Chuẩn bị | |
 | **Phase 5** | Admin Dashboard & Statistics | ⏳ Chuẩn bị | |

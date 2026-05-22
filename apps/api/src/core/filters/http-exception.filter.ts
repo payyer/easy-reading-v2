@@ -12,7 +12,7 @@ import { Request, Response } from 'express';
 export class HttpExceptionFilter implements ExceptionFilter {
   private readonly logger = new Logger(HttpExceptionFilter.name);
 
-  catch(exception: any, host: ArgumentsHost) {
+  catch(exception: unknown, host: ArgumentsHost) {
     const ctx = host.switchToHttp();
     const response = ctx.getResponse<Response>();
     const request = ctx.getRequest<Request>();
@@ -23,9 +23,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
         : HttpStatus.INTERNAL_SERVER_ERROR;
 
     const exceptionResponse =
-      exception instanceof HttpException
-        ? exception.getResponse()
-        : null;
+      exception instanceof HttpException ? exception.getResponse() : null;
 
     const errorResponse = {
       statusCode: status,
@@ -35,22 +33,32 @@ export class HttpExceptionFilter implements ExceptionFilter {
       error: '',
     };
 
+    const exceptionError =
+      exception instanceof Error ? exception : new Error(String(exception));
+
     if (exceptionResponse && typeof exceptionResponse === 'object') {
-      const responseObj = exceptionResponse as Record<string, any>;
-      errorResponse.message = Array.isArray(responseObj.message)
-        ? responseObj.message.join(', ')
-        : responseObj.message || exception.message;
-      errorResponse.error = responseObj.error || '';
+      const responseObj = exceptionResponse as Record<string, unknown>;
+      const msgVal = responseObj.message;
+      errorResponse.message = Array.isArray(msgVal)
+        ? msgVal.join(', ')
+        : typeof msgVal === 'string'
+          ? msgVal
+          : exceptionError.message;
+      errorResponse.error =
+        typeof responseObj.error === 'string' ? responseObj.error : '';
     } else {
-      errorResponse.message = exception.message || 'Internal server error';
-      errorResponse.error = status === HttpStatus.INTERNAL_SERVER_ERROR ? 'Internal Server Error' : '';
+      errorResponse.message = exceptionError.message || 'Internal server error';
+      errorResponse.error =
+        status === Number(HttpStatus.INTERNAL_SERVER_ERROR)
+          ? 'Internal Server Error'
+          : '';
     }
 
     // Ghi log chi tiết
-    if (status === HttpStatus.INTERNAL_SERVER_ERROR) {
+    if (status === Number(HttpStatus.INTERNAL_SERVER_ERROR)) {
       this.logger.error(
-        `[${request.method}] ${request.url} - Error: ${exception.message}`,
-        exception.stack,
+        `[${request.method}] ${request.url} - Error: ${exceptionError.message}`,
+        exceptionError.stack,
       );
     } else {
       this.logger.warn(

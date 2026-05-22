@@ -7,20 +7,28 @@ import {
   Logger,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { SupabaseService } from '../../core/config/supabase.service';
+import { JwtService } from '@nestjs/jwt';
+import * as bcrypt from 'bcrypt';
+import * as crypto from 'crypto';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { GoogleLoginDto } from './dto/google-login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { VerifyEmailDto } from './dto/verify-email.dto';
+import { UserEntity } from '../users/entities/user.entity';
+import { MailService } from '../mail/mail.service';
+import { UsersService } from '../users/users.service';
 
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
 
   constructor(
-    private readonly supabaseService: SupabaseService,
+    private readonly usersService: UsersService,
+    private readonly jwtService: JwtService,
+    private readonly mailService: MailService,
     private readonly configService: ConfigService,
   ) {}
 
@@ -29,29 +37,87 @@ export class AuthService {
    */
   async register(registerDto: RegisterDto) {
     const { email, password } = registerDto;
-    const client = this.supabaseService.getClient();
-    const frontendUrl = this.configService.get<string>('FRONTEND_URL') || 'http://localhost:3000';
 
-    const { data, error } = await client.auth.signUp({
-      email,
-      password,
-      options: {
-        emailRedirectTo: `${frontendUrl}`,
-      },
-    });
-
-    if (error) {
-      this.logger.error(`Đăng ký thất bại cho email ${email}: ${error.message}`);
-      this.handleAuthError(error);
+    // Kiểm tra email đã tồn tại chưa
+    const existingUser = await this.usersService.findByEmail(email);
+    if (existingUser) {
+      throw new ConflictException('Tài khoản email này đã được đăng ký');
     }
 
-    // Supabase có thể trả về user nhưng cần xác nhận email (nếu bật tính năng này)
-    // Hoặc trả về session nếu không yêu cầu xác nhận email.
+    try {
+      // Băm mật khẩu
+      const passwordHash = await bcrypt.hash(password, 10);
+
+      // Tạo verification token
+      const verificationToken = crypto.randomUUID();
+      const verificationTokenExpires = new Date(
+        Date.now() + 24 * 60 * 60 * 1000,
+      ); // 24 giờ
+
+      // Tạo và lưu user mới
+      const user = await this.usersService.create({
+        email,
+        password_hash: passwordHash,
+        role: 'user',
+        is_verified: false,
+        verification_token: verificationToken,
+        verification_token_expires: verificationTokenExpires,
+      });
+
+      // Gửi email xác thực (chạy bất đồng bộ, không block response)
+      this.mailService
+        .sendVerificationEmail(email, verificationToken)
+        .catch((err: unknown) => {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          this.logger.error(`Lỗi gửi email xác thực đến ${email}: ${errMsg}`);
+        });
+
+      return {
+        message:
+          'Đăng ký tài khoản thành công. Vui lòng kiểm tra email để xác thực tài khoản.',
+        userId: user.id,
+        email: user.email,
+        confirmed: false,
+      };
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Đăng ký thất bại cho email ${email}: ${errMsg}`);
+      throw new InternalServerErrorException(
+        'Lỗi hệ thống khi đăng ký tài khoản',
+      );
+    }
+  }
+
+  /**
+   * Xác thực email của người dùng
+   */
+  async verifyEmail(verifyEmailDto: VerifyEmailDto) {
+    const { token } = verifyEmailDto;
+
+    const user = await this.usersService.findByVerificationToken(token);
+
+    if (!user) {
+      throw new BadRequestException('Mã xác thực không hợp lệ');
+    }
+
+    if (
+      user.verification_token_expires &&
+      user.verification_token_expires < new Date()
+    ) {
+      throw new BadRequestException(
+        'Mã xác thực đã hết hạn. Vui lòng đăng ký lại hoặc yêu cầu đặt lại mật khẩu.',
+      );
+    }
+
+    user.is_verified = true;
+    user.verification_token = null;
+    user.verification_token_expires = null;
+
+    await this.usersService.save(user);
+
     return {
-      message: 'Đăng ký tài khoản thành công',
-      userId: data.user?.id,
-      email: data.user?.email,
-      confirmed: data.user?.email_confirmed_at ? true : false,
+      message:
+        'Xác thực tài khoản thành công. Bạn có thể đăng nhập ngay bây giờ.',
     };
   }
 
@@ -60,57 +126,119 @@ export class AuthService {
    */
   async login(loginDto: LoginDto) {
     const { email, password } = loginDto;
-    const client = this.supabaseService.getClient();
 
-    const { data, error } = await client.auth.signInWithPassword({
-      email,
-      password,
-    });
-
-    if (error) {
-      this.logger.error(`Đăng nhập thất bại cho email ${email}: ${error.message}`);
-      this.handleAuthError(error);
+    const user = await this.usersService.findByEmail(email);
+    if (!user) {
+      throw new UnauthorizedException('Thông tin đăng nhập không chính xác');
     }
 
+    // Nếu tài khoản chưa xác thực email, không cho đăng nhập
+    if (!user.is_verified) {
+      throw new UnauthorizedException(
+        'Tài khoản của bạn chưa được xác thực email. Vui lòng kiểm tra hộp thư.',
+      );
+    }
+
+    if (!user.password_hash) {
+      throw new UnauthorizedException(
+        'Tài khoản này được đăng ký qua Google. Vui lòng chọn đăng nhập bằng Google.',
+      );
+    }
+
+    const isPasswordValid = await bcrypt.compare(password, user.password_hash);
+    if (!isPasswordValid) {
+      throw new UnauthorizedException('Thông tin đăng nhập không chính xác');
+    }
+
+    // Sinh tokens
+    const tokens = await this.generateTokens(user);
+
     return {
-      access_token: data.session?.access_token,
-      refresh_token: data.session?.refresh_token,
-      expires_in: data.session?.expires_in,
+      ...tokens,
       user: {
-        id: data.user?.id,
-        email: data.user?.email,
-        role: data.user?.app_metadata?.role || 'user',
+        id: user.id,
+        email: user.email,
+        role: user.role,
       },
     };
   }
 
   /**
-   * Đăng nhập bằng Google ID Token (Social Login)
+   * Đăng nhập bằng Google ID Token
    */
   async googleLogin(googleLoginDto: GoogleLoginDto) {
     const { idToken } = googleLoginDto;
-    const client = this.supabaseService.getClient();
 
-    const { data, error } = await client.auth.signInWithIdToken({
-      provider: 'google',
-      token: idToken,
-    });
+    try {
+      // Gọi API Google Token Info để xác thực token và lấy thông tin user
+      const response = await fetch(
+        `https://oauth2.googleapis.com/tokeninfo?id_token=${idToken}`,
+      );
+      if (!response.ok) {
+        throw new UnauthorizedException(
+          'Google ID Token không hợp lệ hoặc đã hết hạn',
+        );
+      }
 
-    if (error) {
-      this.logger.error(`Đăng nhập Google thất bại: ${error.message}`);
-      this.handleAuthError(error);
+      const payload = (await response.json()) as {
+        email: string;
+        email_verified?: string;
+      };
+      const email = payload.email;
+
+      if (!email) {
+        throw new BadRequestException(
+          'Không tìm thấy địa chỉ email từ Google Token info',
+        );
+      }
+
+      let user = await this.usersService.findByEmail(email);
+
+      if (!user) {
+        // Tạo tài khoản mới từ Google Auth
+        user = await this.usersService.create({
+          email,
+          password_hash: null,
+          role: 'user',
+          is_verified: true, // Google đã xác thực email này
+        });
+        this.logger.log(
+          `Tạo tài khoản Google mới thành công cho email ${email}`,
+        );
+      } else {
+        // Nếu user đã tồn tại nhưng chưa verified (tài khoản đăng ký thường nhưng chưa bấm link mail),
+        // đăng nhập Google cũng coi như xác nhận verified email của họ.
+        if (!user.is_verified) {
+          user.is_verified = true;
+          user.verification_token = null;
+          user.verification_token_expires = null;
+          await this.usersService.save(user);
+        }
+      }
+
+      const tokens = await this.generateTokens(user);
+
+      return {
+        ...tokens,
+        user: {
+          id: user.id,
+          email: user.email,
+          role: user.role,
+        },
+      };
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Đăng nhập Google thất bại: ${errMsg}`);
+      if (
+        err instanceof UnauthorizedException ||
+        err instanceof BadRequestException
+      ) {
+        throw err;
+      }
+      throw new InternalServerErrorException(
+        'Lỗi hệ thống khi đăng nhập Google',
+      );
     }
-
-    return {
-      access_token: data.session?.access_token,
-      refresh_token: data.session?.refresh_token,
-      expires_in: data.session?.expires_in,
-      user: {
-        id: data.user?.id,
-        email: data.user?.email,
-        role: data.user?.app_metadata?.role || 'user',
-      },
-    };
   }
 
   /**
@@ -118,43 +246,46 @@ export class AuthService {
    */
   async refresh(refreshTokenDto: RefreshTokenDto) {
     const { refreshToken } = refreshTokenDto;
-    const client = this.supabaseService.getClient();
 
-    const { data, error } = await client.auth.refreshSession({
-      refresh_token: refreshToken,
-    });
+    try {
+      const payload = this.jwtService.verify<{ sub: string; type: string }>(
+        refreshToken,
+      );
 
-    if (error) {
-      this.logger.error(`Làm mới token thất bại: ${error.message}`);
-      this.handleAuthError(error);
+      if (payload.type !== 'refresh') {
+        throw new UnauthorizedException('Refresh token không hợp lệ');
+      }
+
+      const user = await this.usersService.findById(payload.sub);
+      if (!user) {
+        throw new UnauthorizedException('Người dùng không tồn tại');
+      }
+
+      const tokens = await this.generateTokens(user);
+
+      return {
+        ...tokens,
+        user: {
+          id: user.id,
+          email: user.email,
+          role: user.role,
+        },
+      };
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Làm mới token thất bại: ${errMsg}`);
+      throw new UnauthorizedException(
+        'Refresh token không hợp lệ hoặc đã hết hạn',
+      );
     }
-
-    return {
-      access_token: data.session?.access_token,
-      refresh_token: data.session?.refresh_token,
-      expires_in: data.session?.expires_in,
-      user: {
-        id: data.user?.id,
-        email: data.user?.email,
-        role: data.user?.app_metadata?.role || 'user',
-      },
-    };
   }
 
   /**
-   * Đăng xuất session hiện tại (Revoke Access Token)
+   * Đăng xuất session hiện tại (Stateless)
    */
-  async logout(accessToken: string) {
-    const client = this.supabaseService.getClient();
-
-    // Sử dụng Admin API để thu hồi session dựa trên Access Token của user
-    const { error } = await client.auth.admin.signOut(accessToken);
-
-    if (error) {
-      this.logger.error(`Đăng xuất thất bại: ${error.message}`);
-      this.handleAuthError(error);
-    }
-
+  logout() {
+    // Với JWT stateless, phía Backend chỉ cần thông báo thành công.
+    // Client chịu trách nhiệm xóa token này khỏi bộ nhớ/storage của họ.
     return {
       message: 'Đăng xuất thành công',
     };
@@ -165,67 +296,123 @@ export class AuthService {
    */
   async forgotPassword(forgotPasswordDto: ForgotPasswordDto) {
     const { email } = forgotPasswordDto;
-    const client = this.supabaseService.getClient();
-    const frontendUrl = this.configService.get<string>('FRONTEND_URL') || 'http://localhost:3000';
 
-    const { error } = await client.auth.resetPasswordForEmail(email, {
-      redirectTo: `${frontendUrl}/reset-password`,
-    });
-
-    if (error) {
-      this.logger.error(`Yêu cầu reset password thất bại cho email ${email}: ${error.message}`);
-      this.handleAuthError(error);
+    const user = await this.usersService.findByEmail(email);
+    if (!user) {
+      // Để tránh Email Enumeration attack (bảo mật), ta trả về kết quả thành công giả vờ
+      return {
+        message:
+          'Đường dẫn đặt lại mật khẩu đã được gửi đến email của bạn nếu tài khoản tồn tại.',
+      };
     }
 
-    return {
-      message: 'Đường dẫn đặt lại mật khẩu đã được gửi đến email của bạn',
-    };
+    try {
+      const resetToken = crypto.randomUUID();
+      const resetTokenExpires = new Date(Date.now() + 1 * 60 * 60 * 1000); // 1 giờ
+
+      user.reset_token = resetToken;
+      user.reset_token_expires = resetTokenExpires;
+      await this.usersService.save(user);
+
+      // Gửi email đặt lại mật khẩu
+      this.mailService
+        .sendPasswordResetEmail(email, resetToken)
+        .catch((err: unknown) => {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          this.logger.error(
+            `Lỗi gửi email reset password đến ${email}: ${errMsg}`,
+          );
+        });
+
+      return {
+        message:
+          'Đường dẫn đặt lại mật khẩu đã được gửi đến email của bạn nếu tài khoản tồn tại.',
+      };
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      this.logger.error(
+        `Yêu cầu reset password thất bại cho email ${email}: ${errMsg}`,
+      );
+      throw new InternalServerErrorException(
+        'Lỗi hệ thống khi yêu cầu đặt lại mật khẩu',
+      );
+    }
   }
 
   /**
-   * Đặt lại mật khẩu mới cho người dùng
+   * Đặt lại mật khẩu mới cho người dùng bằng token nhận được từ mail
    */
-  async resetPassword(userId: string, resetPasswordDto: ResetPasswordDto) {
-    const { newPassword } = resetPasswordDto;
-    const client = this.supabaseService.getClient();
+  async resetPassword(resetPasswordDto: ResetPasswordDto) {
+    const { token, newPassword } = resetPasswordDto;
 
-    // Sử dụng Admin API để cập nhật mật khẩu dựa trên userId
-    const { error } = await client.auth.admin.updateUserById(userId, {
-      password: newPassword,
-    });
+    const user = await this.usersService.findByResetToken(token);
 
-    if (error) {
-      this.logger.error(`Cập nhật mật khẩu thất bại cho userId ${userId}: ${error.message}`);
-      this.handleAuthError(error);
+    if (!user) {
+      throw new BadRequestException('Mã token reset mật khẩu không hợp lệ');
     }
 
-    return {
-      message: 'Mật khẩu đã được cập nhật thành công',
-    };
-  }
+    if (user.reset_token_expires && user.reset_token_expires < new Date()) {
+      throw new BadRequestException('Mã token reset mật khẩu đã hết hạn');
+    }
 
-  /**
-   * Xử lý lỗi từ Supabase và ánh xạ sang các NestJS HTTP Exceptions
-   */
-  private handleAuthError(error: any): never {
-    const status = error.status || 500;
-    const message = error.message || 'Lỗi xác thực hệ thống';
+    try {
+      user.password_hash = await bcrypt.hash(newPassword, 10);
+      user.reset_token = null;
+      user.reset_token_expires = null;
 
-    if (status === 400) {
-      if (message.includes('already registered') || message.includes('already exists')) {
-        throw new ConflictException('Tài khoản email này đã được đăng ký');
+      // Nếu user chưa verify email mà đã reset được pass (nghĩa là họ truy cập được mail để reset),
+      // ta cũng coi như xác nhận verified email của họ.
+      if (!user.is_verified) {
+        user.is_verified = true;
+        user.verification_token = null;
+        user.verification_token_expires = null;
       }
-      throw new BadRequestException(message);
-    }
 
-    if (status === 401 || status === 403 || message.includes('invalid claim') || message.includes('invalid credentials')) {
-      throw new UnauthorizedException('Thông tin xác thực không chính xác hoặc đã hết hạn');
-    }
+      await this.usersService.save(user);
 
-    if (status === 422) {
-      throw new BadRequestException(`Dữ liệu không thể xử lý: ${message}`);
+      return {
+        message: 'Mật khẩu đã được cập nhật thành công',
+      };
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Cập nhật mật khẩu thất bại: ${errMsg}`);
+      throw new InternalServerErrorException(
+        'Lỗi hệ thống khi cập nhật mật khẩu',
+      );
     }
+  }
 
-    throw new InternalServerErrorException(message);
+  /**
+   * Helper để sinh cặp Access Token và Refresh Token
+   */
+  private async generateTokens(user: UserEntity) {
+    const payload = {
+      sub: user.id,
+      email: user.email,
+      role: user.role,
+    };
+
+    const refreshPayload = {
+      sub: user.id,
+      type: 'refresh',
+    };
+
+    const access_token = await this.jwtService.signAsync(payload);
+    const refresh_token = await this.jwtService.signAsync(refreshPayload, {
+      expiresIn: '30d', // Refresh token có hạn dài hơn (30 ngày)
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+    const decoded: any = this.jwtService.decode(access_token);
+    const expires_in =
+      decoded && typeof decoded === 'object' && 'exp' in decoded
+        ? (decoded as { exp: number }).exp - Math.floor(Date.now() / 1000)
+        : 3600;
+
+    return {
+      access_token,
+      refresh_token,
+      expires_in,
+    };
   }
 }

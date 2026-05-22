@@ -38,9 +38,11 @@ async function bootstrap() {
 
   const port = process.env.PORT ?? 3001;
   await app.listen(port);
-  
+
   // Dùng console.log để admin thấy link nhanh ở console terminal
   console.log(`\n🚀 NestJS server running on: http://localhost:${port}`);
-  console.log(`📚 Swagger docs available on: http://localhost:${port}/api/docs\n`);
+  console.log(
+    `📚 Swagger docs available on: http://localhost:${port}/api/docs\n`,
+  );
 }
-bootstrap();
+void bootstrap();

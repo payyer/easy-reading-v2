@@ -3,6 +3,14 @@ import { IsNotEmpty, IsString, MinLength } from 'class-validator';
 
 export class ResetPasswordDto {
   @ApiProperty({
+    description: 'Mã token reset mật khẩu nhận được từ email',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @IsNotEmpty({ message: 'Token không được để trống' })
+  @IsString({ message: 'Token phải là một chuỗi ký tự' })
+  token: string;
+
+  @ApiProperty({
     description: 'Mật khẩu mới của tài khoản (tối thiểu 6 ký tự)',
     example: 'newpassword123',
   })

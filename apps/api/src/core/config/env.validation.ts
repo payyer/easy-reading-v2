@@ -1,5 +1,12 @@
 import { plainToInstance } from 'class-transformer';
-import { IsEnum, IsNotEmpty, IsNumber, IsOptional, IsString, validateSync } from 'class-validator';
+import {
+  IsEnum,
+  IsNotEmpty,
+  IsNumber,
+  IsOptional,
+  IsString,
+  validateSync,
+} from 'class-validator';
 
 enum Environment {
   Development = 'development',
@@ -18,15 +25,15 @@ class EnvironmentVariables {
 
   @IsString()
   @IsNotEmpty()
-  SUPABASE_URL: string;
+  DATABASE_URL: string;
 
   @IsString()
   @IsNotEmpty()
-  SUPABASE_ANON_KEY: string;
+  JWT_SECRET: string;
 
   @IsString()
-  @IsNotEmpty()
-  SUPABASE_SERVICE_ROLE_KEY: string;
+  @IsOptional()
+  JWT_EXPIRATION: string = '7d';
 
   @IsString()
   @IsNotEmpty()
@@ -34,16 +41,40 @@ class EnvironmentVariables {
 
   @IsString()
   @IsOptional()
+  GEMINI_MODEL: string = 'gemini-2.5-flash';
+
+  @IsString()
+  @IsOptional()
   FRONTEND_URL: string = 'http://localhost:3000';
+
+  @IsString()
+  @IsOptional()
+  SMTP_HOST?: string;
+
+  @IsNumber()
+  @IsOptional()
+  SMTP_PORT?: number;
+
+  @IsString()
+  @IsOptional()
+  SMTP_USER?: string;
+
+  @IsString()
+  @IsOptional()
+  SMTP_PASS?: string;
+
+  @IsString()
+  @IsOptional()
+  SMTP_FROM?: string;
 }
 
 export function validate(config: Record<string, any>) {
-  const validatedConfig = plainToInstance(
-    EnvironmentVariables,
-    config,
-    { enableImplicitConversion: true },
-  );
-  const errors = validateSync(validatedConfig, { skipMissingProperties: false });
+  const validatedConfig = plainToInstance(EnvironmentVariables, config, {
+    enableImplicitConversion: true,
+  });
+  const errors = validateSync(validatedConfig, {
+    skipMissingProperties: false,
+  });
 
   if (errors.length > 0) {
     throw new Error(errors.toString());
